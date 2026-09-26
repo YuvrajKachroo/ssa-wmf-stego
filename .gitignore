@@ -33,4 +33,5 @@ results/
 
 # OS files
 .DS_Store
-Thumbs.dboutputs/
+Thumbs.db
+outputs/
