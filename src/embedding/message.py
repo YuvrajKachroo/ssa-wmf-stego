@@ -105,3 +105,117 @@ def bits_to_bytes(bits: np.ndarray) -> bytes:
         return b""
 
     return np.packbits(payload_bits).tobytes()
+
+
+HEADER_BITS = 32
+
+
+def encode_message(
+    data: bytes,
+    capacity_bits: int,
+) -> np.ndarray:
+    """Encode a byte message into a fixed-capacity bit array.
+
+    Format:
+
+        [32-bit payload-length header]
+        [payload bits]
+        [zero padding]
+
+    The header stores the payload length in bits using
+    least-significant-bit-first ordering.
+    """
+
+    if not isinstance(data, bytes):
+        raise TypeError("data must be a bytes object.")
+
+    if capacity_bits < HEADER_BITS:
+        raise ValueError(f"capacity_bits must be at least {HEADER_BITS}.")
+
+    payload = np.unpackbits(
+        np.frombuffer(
+            data,
+            dtype=np.uint8,
+        )
+    ).astype(
+        np.uint8,
+        copy=False,
+    )
+
+    payload_length = len(payload)
+
+    total_needed = HEADER_BITS + payload_length
+
+    if total_needed > capacity_bits:
+        raise ValueError(
+            f"message needs {total_needed} bits, capacity is only {capacity_bits}"
+        )
+
+    # Store the payload length LSB-first.
+    header = np.array(
+        [(payload_length >> bit) & 1 for bit in range(HEADER_BITS)],
+        dtype=np.uint8,
+    )
+
+    padding = np.zeros(
+        capacity_bits - total_needed,
+        dtype=np.uint8,
+    )
+
+    return np.concatenate(
+        [
+            header,
+            payload,
+            padding,
+        ]
+    )
+
+
+def decode_message(
+    bits: np.ndarray,
+) -> bytes:
+    """Decode a fixed-capacity message bit array.
+
+    A malformed or wrong-key extraction can produce a header
+    claiming more payload bits than are actually available.
+    Such cases raise ValueError rather than silently returning
+    arbitrary data.
+    """
+
+    bits = np.asarray(
+        bits,
+        dtype=np.uint8,
+    )
+
+    if bits.ndim != 1:
+        raise ValueError("bits must be a one-dimensional array.")
+
+    if len(bits) < HEADER_BITS:
+        raise ValueError(
+            f"need at least {HEADER_BITS} bits for the header, got {len(bits)}"
+        )
+
+    if not np.all((bits == 0) | (bits == 1)):
+        raise ValueError("bits must contain only 0 and 1.")
+
+    header = bits[:HEADER_BITS]
+
+    payload_length = sum(int(bit) << index for index, bit in enumerate(header))
+
+    available = len(bits) - HEADER_BITS
+
+    if payload_length > available:
+        raise ValueError(
+            f"header claims {payload_length} payload bits "
+            f"but only {available} are available "
+            f"-- likely wrong key/H_hat, or corrupted/tampered "
+            f"stego data"
+        )
+
+    # A valid byte message must contain whole bytes.
+    if payload_length % 8 != 0:
+        raise ValueError(f"payload length {payload_length} is not byte-aligned")
+
+    payload = bits[HEADER_BITS : HEADER_BITS + payload_length]
+
+    return np.packbits(payload).tobytes()
