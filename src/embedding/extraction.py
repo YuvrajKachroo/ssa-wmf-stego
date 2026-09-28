@@ -265,14 +265,24 @@ def embed_secret(
     # current STC formulation.
     capacity_bits = len(cover_flat) // key.w
 
-    message_bits = encode_message(
-        secret,
-        capacity_bits=capacity_bits,
-    )
-
     H_hat = key.build_H_hat()
 
     cover_bits = (cover_flat & 1).astype(np.uint8)
+
+    # Preserve the cover's existing syndrome in the unused
+    # capacity positions. Only the header + actual payload
+    # should be changed.
+    cover_syndrome = stc_decode(
+        cover_bits,
+        H_hat,
+        capacity_bits,
+    )
+
+    message_bits = encode_message(
+        secret,
+        capacity_bits=capacity_bits,
+        fill_bits=cover_syndrome,
+    )
 
     # Binary STC flip cost:
     # choose the cheaper FEASIBLE directional modification.

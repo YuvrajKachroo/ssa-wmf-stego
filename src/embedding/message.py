@@ -1,221 +1,169 @@
-"""Message byte/bit codec for the Phase 9 STC pipeline.
-
-Format:
-
-    32-bit unsigned big-endian payload length in bytes
-    followed by the payload bytes.
-
-The resulting stream is converted to a NumPy uint8 bit array
-containing only 0 and 1.
-"""
-
 from __future__ import annotations
 
 import numpy as np
 
 
 LENGTH_HEADER_BITS = 32
-LENGTH_HEADER_BYTES = 4
-MAX_PAYLOAD_BYTES = (2**32) - 1
+HEADER_BITS = LENGTH_HEADER_BITS
 
 
-def bytes_to_bits(message: bytes) -> np.ndarray:
-    """Encode bytes as [32-bit length header | payload] bits.
+def bytes_to_bits(data: bytes) -> np.ndarray:
+    """Encode bytes as a 32-bit big-endian length header + payload bits."""
 
-    Parameters
-    ----------
-    message:
-        Arbitrary bytes object.
+    payload = bytes(data)
 
-    Returns
-    -------
-    np.ndarray
-        One-dimensional uint8 array containing only 0 and 1.
-    """
-    if not isinstance(message, bytes):
-        raise TypeError("message must be a bytes object.")
-
-    payload_length = len(message)
-
-    if payload_length > MAX_PAYLOAD_BYTES:
-        raise ValueError("message is too large for the 32-bit length header.")
-
-    header = payload_length.to_bytes(
-        LENGTH_HEADER_BYTES,
-        byteorder="big",
-        signed=False,
+    header = np.array(
+        [
+            (len(payload) >> shift) & 1
+            for shift in range(LENGTH_HEADER_BITS - 1, -1, -1)
+        ],
+        dtype=np.uint8,
     )
 
-    encoded = header + message
+    if len(payload) == 0:
+        return header
 
-    return np.unpackbits(
-        np.frombuffer(
-            encoded,
-            dtype=np.uint8,
-        )
-    ).astype(
-        np.uint8,
-        copy=False,
+    payload_bits = np.unpackbits(
+        np.frombuffer(payload, dtype=np.uint8)
+    ).astype(np.uint8)
+
+    return np.concatenate(
+        [
+            header,
+            payload_bits,
+        ]
     )
 
 
 def bits_to_bytes(bits: np.ndarray) -> bytes:
-    """Decode [32-bit length header | payload] bits back to bytes.
+    """Decode a complete encoded message."""
 
-    The supplied bit array must contain exactly the number of bits
-    declared by its 32-bit length header.
-    """
     bits = np.asarray(bits)
 
     if bits.ndim != 1:
-        raise ValueError("bits must be a one-dimensional array.")
-
-    if bits.size < LENGTH_HEADER_BITS:
-        raise ValueError("bits must contain at least the 32-bit length header.")
+        raise ValueError("bits must be one-dimensional")
 
     if not np.all((bits == 0) | (bits == 1)):
-        raise ValueError("bits must contain only 0 and 1.")
+        raise ValueError("bits must contain only 0/1 values")
 
-    if bits.size % 8 != 0:
-        raise ValueError("number of bits must be divisible by 8.")
+    bits = bits.astype(np.uint8, copy=False)
 
-    bits = bits.astype(
-        np.uint8,
-        copy=False,
+    if bits.size < LENGTH_HEADER_BITS:
+        raise ValueError("not enough bits for length header")
+
+    payload_length = 0
+
+    for bit in bits[:LENGTH_HEADER_BITS]:
+        payload_length = (payload_length << 1) | int(bit)
+
+    expected_length = (
+        LENGTH_HEADER_BITS
+        + payload_length * 8
     )
 
-    header_bytes = np.packbits(bits[:LENGTH_HEADER_BITS]).tobytes()
-
-    payload_length = int.from_bytes(
-        header_bytes,
-        byteorder="big",
-        signed=False,
-    )
-
-    expected_bits = LENGTH_HEADER_BITS + payload_length * 8
-
-    if bits.size != expected_bits:
+    if bits.size != expected_length:
         raise ValueError(
-            "bit array length does not match the payload length declared in the header."
+            "bit length does not match encoded payload length"
         )
-
-    payload_bits = bits[LENGTH_HEADER_BITS:]
 
     if payload_length == 0:
         return b""
 
+    payload_bits = bits[LENGTH_HEADER_BITS:]
+
     return np.packbits(payload_bits).tobytes()
-
-
-HEADER_BITS = 32
 
 
 def encode_message(
     data: bytes,
     capacity_bits: int,
+    fill_bits: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Encode a byte message into a fixed-capacity bit array.
+    """Create a full STC syndrome vector.
 
-    Format:
-
-        [32-bit payload-length header]
-        [payload bits]
-        [zero padding]
-
-    The header stores the payload length in bits using
-    least-significant-bit-first ordering.
+    The message occupies the beginning of the syndrome.
+    Unused capacity is preserved from fill_bits when supplied.
     """
 
-    if not isinstance(data, bytes):
-        raise TypeError("data must be a bytes object.")
+    encoded_message = bytes_to_bits(data)
 
-    if capacity_bits < HEADER_BITS:
-        raise ValueError(f"capacity_bits must be at least {HEADER_BITS}.")
+    if capacity_bits < encoded_message.size:
+        raise ValueError(
+            f"message requires {encoded_message.size} bits, "
+            f"but capacity is {capacity_bits}"
+        )
 
-    payload = np.unpackbits(
-        np.frombuffer(
-            data,
+    if fill_bits is None:
+        encoded = np.zeros(
+            capacity_bits,
             dtype=np.uint8,
         )
-    ).astype(
-        np.uint8,
-        copy=False,
-    )
 
-    payload_length = len(payload)
+    else:
+        fill_bits = np.asarray(fill_bits)
 
-    total_needed = HEADER_BITS + payload_length
+        if fill_bits.ndim != 1:
+            raise ValueError("fill_bits must be one-dimensional")
 
-    if total_needed > capacity_bits:
-        raise ValueError(
-            f"message needs {total_needed} bits, capacity is only {capacity_bits}"
+        if fill_bits.size != capacity_bits:
+            raise ValueError(
+                f"fill_bits must contain exactly "
+                f"capacity_bits={capacity_bits} bits"
+            )
+
+        if not np.all(
+            (fill_bits == 0) | (fill_bits == 1)
+        ):
+            raise ValueError(
+                "fill_bits must contain only 0/1 values"
+            )
+
+        encoded = fill_bits.astype(
+            np.uint8,
+            copy=True,
         )
 
-    # Store the payload length LSB-first.
-    header = np.array(
-        [(payload_length >> bit) & 1 for bit in range(HEADER_BITS)],
-        dtype=np.uint8,
-    )
+    encoded[: encoded_message.size] = encoded_message
 
-    padding = np.zeros(
-        capacity_bits - total_needed,
-        dtype=np.uint8,
-    )
-
-    return np.concatenate(
-        [
-            header,
-            payload,
-            padding,
-        ]
-    )
+    return encoded
 
 
-def decode_message(
-    bits: np.ndarray,
-) -> bytes:
-    """Decode a fixed-capacity message bit array.
+def decode_message(bits: np.ndarray) -> bytes:
+    """Decode a message from a syndrome vector.
 
-    A malformed or wrong-key extraction can produce a header
-    claiming more payload bits than are actually available.
-    Such cases raise ValueError rather than silently returning
-    arbitrary data.
+    Extra trailing bits are allowed because the STC capacity
+    is generally larger than the actual secret message.
     """
 
-    bits = np.asarray(
-        bits,
-        dtype=np.uint8,
-    )
+    bits = np.asarray(bits)
 
     if bits.ndim != 1:
-        raise ValueError("bits must be a one-dimensional array.")
-
-    if len(bits) < HEADER_BITS:
-        raise ValueError(
-            f"need at least {HEADER_BITS} bits for the header, got {len(bits)}"
-        )
+        raise ValueError("bits must be one-dimensional")
 
     if not np.all((bits == 0) | (bits == 1)):
-        raise ValueError("bits must contain only 0 and 1.")
+        raise ValueError("bits must contain only 0/1 values")
 
-    header = bits[:HEADER_BITS]
+    bits = bits.astype(np.uint8, copy=False)
 
-    payload_length = sum(int(bit) << index for index, bit in enumerate(header))
+    if bits.size < LENGTH_HEADER_BITS:
+        raise ValueError("not enough bits for length header")
 
-    available = len(bits) - HEADER_BITS
+    payload_length = 0
 
-    if payload_length > available:
+    for bit in bits[:LENGTH_HEADER_BITS]:
+        payload_length = (payload_length << 1) | int(bit)
+
+    end = (
+        LENGTH_HEADER_BITS
+        + payload_length * 8
+    )
+
+    if end > bits.size:
         raise ValueError(
-            f"header claims {payload_length} payload bits "
-            f"but only {available} are available "
-            f"-- likely wrong key/H_hat, or corrupted/tampered "
-            f"stego data"
+            f"declared payload requires {end} bits, "
+            f"but only {bits.size} bits are available"
         )
 
-    # A valid byte message must contain whole bytes.
-    if payload_length % 8 != 0:
-        raise ValueError(f"payload length {payload_length} is not byte-aligned")
+    encoded_message = bits[:end]
 
-    payload = bits[HEADER_BITS : HEADER_BITS + payload_length]
-
-    return np.packbits(payload).tobytes()
+    return bits_to_bytes(encoded_message)
