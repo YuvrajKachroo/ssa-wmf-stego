@@ -353,7 +353,7 @@ def main() -> None:
             st.image(
                 cover,
                 caption=(
-                    f"{cover.shape[1]} × "
+                    f"{cover.shape[1]} Ãƒâ€” "
                     f"{cover.shape[0]}"
                 ),
                 clamp=True,
@@ -1068,7 +1068,7 @@ def main() -> None:
     st.divider()
 
     st.caption(
-        "Phase 14 demonstration app — 2D-SSA + WMF adaptive "
+        "Phase 14 demonstration app â€” 2D-SSA + WMF adaptive "
         "spatial image steganography. Stego images should be "
         "kept in lossless formats such as PNG or PGM."
     )
